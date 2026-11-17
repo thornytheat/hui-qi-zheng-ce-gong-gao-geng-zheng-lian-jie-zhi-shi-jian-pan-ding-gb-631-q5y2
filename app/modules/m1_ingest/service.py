@@ -5,11 +5,16 @@ from ... import config, errors
 from . import paging, reader
 
 SOURCE_ALIASES = {
-    "all": "全部门户",
+    "all": "全部门户（v1 三门户）",
     "portal_a": "江阴区工信局",
     "portal_b": "江南市科技局",
     "portal_c": "园区企服中心",
+    "portal_d": "澄江新区政务服务办（改版门户 v2）",
 }
+
+# 「全部门户」默认只含稳定的三门户；改版门户 portal_d 需显式指定 source 触发，
+# 避免新门户上线改变既有批次的固定计数与历史快照语义。
+DEFAULT_PORTAL_IDS = ("portal_a", "portal_b", "portal_c")
 
 
 def make_fetcher(settings, *, offline: bool = True):
@@ -21,7 +26,7 @@ def make_fetcher(settings, *, offline: bool = True):
 
 def select_portals(source: str) -> tuple[dict, ...]:
     if source in (None, "", "all"):
-        return config.PORTALS
+        return tuple(p for p in config.PORTALS if p["id"] in DEFAULT_PORTAL_IDS)
     selected = tuple(p for p in config.PORTALS if p["id"] == source)
     if not selected:
         raise errors.BadRequest(

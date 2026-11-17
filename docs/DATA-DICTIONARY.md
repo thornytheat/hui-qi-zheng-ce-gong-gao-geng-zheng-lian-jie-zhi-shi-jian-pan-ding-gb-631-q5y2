@@ -24,6 +24,26 @@
 - **时间**：入库 UTC（ISO 8601 带偏移），展示 `Asia/Shanghai(+08:00)`；`Z`、`+08:00`、无偏移的本地时刻、纯日期（按当日 00:00 +08:00）、中文日期都接受。
 - **区间**：工作日计数区间 `[发布日次日, 截止日次日)`；自然日 `截止日 = 发布日 + N 天`，区间 `[发布日+1, 截止日+1)`。左闭右开，相邻区间不重不漏。
 
+## 2A 门户契约版本化（额度列改版兼容）
+
+门户改版把「额度」从带单位单列文本拆成「额度数值」「额度单位」两列，系统按**门户管理契约版本**并在采集时**冻结快照绑定批次**，两代契约并存：
+
+| 契约版本 | 额度模式 | 额度列 | 解析路径 | 违约处理 |
+|---|---|---|---|---|
+| `contract/1.4`（v1） | `text` | `资助额度` 单列，数值与单位写在同一格（`420万元`、`12,000,000元`） | `coerce.norm_amount`：全角/千分位归一 + 单位表折算万元，**原文保留** | 坏文本给 `Q_BAD_AMOUNT` |
+| `contract/2.0`（v2） | `split` | `额度数值` + `额度单位` 两列 | `coerce.norm_amount_split`：单位显式校验后按单位表折算，不做旧文本换算 | 见下 |
+
+- **按门户登记**：`app/contracts/registry.py::PORTAL_CONTRACT_REGISTRY` 记录每个门户当前生效版本；portal_a/b/c 为 v1，改版门户 portal_d 为 v2。`all` 来源只含 v1 三门户，portal_d 需显式 source 触发。
+- **采集快照绑定**：采信时按参与门户生成快照（契约定义 + sha256 digest，见 `app/contracts/snapshot.py`），写入 `contract_snapshots` 表与运行清单；批次键在「规则版本 + 来源 + 页面摘要」之外再纳入**快照摘要**，同页面但契约不同会产生不同批次，历史批次不被新契约改写。
+- **v2 隔离规则（新记录）**：
+  - 单位列缺失/空/哨兵而数值列有值 → `Q_AMOUNT_UNIT_MISSING`，禁止用默认单位顶替；
+  - 单位取值未登记（如「美元」）→ `Q_AMOUNT_UNIT_CONFLICT`；
+  - 数值列内嵌单位与单位列不一致（如数值 `120万元` + 单位 `元`）→ `Q_AMOUNT_UNIT_CONFLICT`，不猜以哪个为准；
+  - 两列同为哨兵 → 按未登记（三态 `None`），不是 0；数值无法 Decimal 化 → `Q_BAD_AMOUNT`。
+- **旧批次按原契约恢复**：解析与导出都读批次绑定的快照。v1 公告的 `amount_mode=text`、`raw_amount_text` 保留原始文本、`amount_basis` 写明「v1 文本契约按采集时单位表折算」；**不会把旧额度重新按 v2 解释或换算成新金额**。门户后续切换契约后，历史批次的清单/链版本导出逐字节复现原金额与采用依据。
+- **契约切换**：`POST /api/contract/switch` 先做表头预检（`validate_headers`：必需列 + 额度两列是否命中）；预检失败抛 `Q_CONTRACT_PREFLIGHT_FAILED` 并**保留旧版**，门户不会被切到无法解析的契约；未知版本给 `Q_CONTRACT_UNKNOWN_VERSION`。
+- **采用依据落库**：`announcements` / `chain_versions` 每行带 `contract_version`、`amount_mode`、`raw_amount_text`、`amount_unit`、`amount_basis_json`；清单与链版本 CSV 新增「契约版本 / 额度模式 / 额度原文 / 额度单位 / 采用依据」列。
+
 ## 3 工作日规则
 
 - 工作日 = 周一至周五 − `HOLIDAYS_2026` + `MAKEUP_WORKDAYS_2026`（调休上班日即便落在周末也算工作日）。
@@ -63,7 +83,12 @@
 
 ## 8 运行清单（run manifest）
 
-`run_id`（`NC-时间戳-随机`）、`batch_id`、`batch_key`（规则版本 + 来源 + 页面 sha256 集合）、`input_digest`、`rule_version`、`eval_date`、`params`、每个输入页面的 `url/status/bytes/sha256/encoding`、`stages`（进/出/隔离/耗时/状态）、`counters`。导出：`GET /api/export?kind=manifest`。
+`run_id`（`NC-时间戳-随机`）、`batch_id`、`batch_key`（规则版本 + 来源 + 页面 sha256 集合 + 门户契约快照摘要）、`input_digest`、`contract_snapshot_digest`、`contract_snapshots`（每门户的契约版本/额度模式/digest）、`rule_version`、`eval_date`、`params`、每个输入页面的 `url/status/bytes/sha256/encoding`、`stages`（进/出/隔离/耗时/状态）、`counters`。导出：`GET /api/export?kind=manifest`。
+
+## 8A 原始行断点与续跑
+
+- 采信阶段把每条原始表格行写入 `raw_rows` 表（`batch_id + row_ref` 唯一，含 `fields_json`/`cells_json`/`processed`），解析中断后**从已保存原始行续跑，不重抓已采内容**。
+- 续跑复用矩阵（`app/modules/m5_batches/resume.py`）：采信失败整体重抓；解析/质量失败复用采信（页面 + 9 条原始行）；链判定之后复用已解析公告。续跑 ingest 阶段标记 `reused`，重试不新增公告，原始行数与一次成功运行一致。
 
 ## 9 复核与回放（M7）
 

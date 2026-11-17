@@ -1,20 +1,28 @@
 """字段契约：列定义、必需字段、去重键、区间声明、原因码目录。
 
 对外通过 GET /api/contract 暴露，页面上的「规则」面板读同一份文档，
-保证文档与代码不会各写一套。
+保证文档与代码不会各写一套。门户改版后的契约版本化内容来自 app.contracts：
+- contract/1.4：额度为带单位单列文本（旧批次按原契约恢复）；
+- contract/2.0：额度拆成数值/单位两列（新采集按新契约校验，违约进隔离）。
 """
 from __future__ import annotations
 
-from ... import config, reasons
+from ... import config, contracts, reasons
 from . import fields
 
 CONTRACT_VERSION = fields.CONTRACT_VERSION
 
 
 def document() -> dict:
+    catalog = contracts.catalog()
     return {
         "contract_version": CONTRACT_VERSION,
         "rule_version": config.RULE_VERSION,
+        "active_contract_versions": catalog["portal_registry"],
+        "supported_contract_versions": catalog["supported_versions"],
+        "contracts": catalog["contracts"],
+        "unit_choices": catalog["unit_choices"],
+        "unit_aliases": catalog["unit_aliases"],
         "decimals": {
             "amount_unit": config.MONEY_UNIT,
             "quantize": str(config.DECIMAL_QUANT),
@@ -29,7 +37,7 @@ def document() -> dict:
         "interval": {
             "workdays": "[发布日次日, 截止日] 内取第 N 个工作日；发布日不计入",
             "natural_days": "截止日 = 发布日 + N 天，区间 [发布日, 发布日+N+1)",
-            "endpoint": "相邻区间左闭右开，不重不漏",
+            "endpoint": "相邻区间左闭右开 [start, end)，不重不漏",
         },
         "columns": [
             {

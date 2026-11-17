@@ -21,12 +21,17 @@ def flat_rows(manifest: dict) -> list[list[str]]:
         ["rule_version", manifest.get("rule_version", "")],
         ["eval_date", manifest.get("eval_date", "")],
         ["input_digest", manifest.get("input_digest", "")],
+        ["contract_snapshot_digest", manifest.get("contract_snapshot_digest", "")],
         ["started_at", manifest.get("started_at", "")],
         ["finished_at", manifest.get("finished_at", "")],
         ["elapsed_ms", str(manifest.get("elapsed_ms", ""))],
         ["decimals", manifest.get("decimals", "")],
         ["timezone", manifest.get("timezone", "")],
     ]
+    for snap in manifest.get("contract_snapshots", []):
+        rows.append([f"contract:{snap['portal']}",
+                     f"{snap['contract_version']} mode={snap['amount_mode']} "
+                     f"digest={snap['digest']}"])
     for page in manifest.get("inputs", []):
         rows.append([f"input:{page['url']}", f"sha256={page['sha256']} bytes={page['bytes']} "
                                              f"encoding={page['encoding']}"])

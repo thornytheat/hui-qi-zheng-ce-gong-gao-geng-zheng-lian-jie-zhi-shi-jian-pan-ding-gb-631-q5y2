@@ -2,14 +2,19 @@
 
 一个「行」最多产生一个公告或一组隔离行；隔离行数按记录计，
 对账时 rows_seen = 解析成功记录 + 隔离记录。
+
+契约版本：
+- v1（contract/1.4）：额度为带单位单列文本，保留改版前的文本折算路径，
+  历史失败批次按原契约恢复，不把旧额度换算成新金额；
+- v2（contract/2.0）：额度拆成数值/单位两列，单位缺失或单位冲突整行进隔离。
+每行公告都记下 `contract_version`、额度原文与「采用依据」，导出可逐行复现。
 """
 from __future__ import annotations
 
-import datetime as dt
 from dataclasses import dataclass, field
 from decimal import Decimal
 
-from ... import config, reasons
+from ... import config, contracts, reasons
 from . import coerce, contract, fields
 
 
@@ -41,18 +46,65 @@ def _q(code: str, *, portal: str, source_url: str, row_ref: str,
     }
 
 
+def _amount_basis_v1(raw_text: str | None, amount: Decimal | None,
+                     unit: str) -> dict:
+    if amount is None:
+        return {"mode": "text", "raw_amount": coerce.clean(raw_text),
+                "raw_unit_text": "", "basis": "v1 文本契约：空值/哨兵/转引按未登记，未折算"}
+    return {
+        "mode": "text",
+        "raw_amount": coerce.clean(raw_text),
+        "raw_unit_text": unit,
+        "basis": (f"v1 文本契约：原文「{coerce.clean(raw_text)}」按采集时单位表"
+                  f"（{unit}）折算成万元，保留原文不重算"),
+    }
+
+
+def _parse_amount_v2(canon: dict, *, portal: str, source_url: str,
+                     row_ref: str) -> tuple[Decimal | None, str | None, list[dict], dict]:
+    """v2 双列额度：返回 (万元值, 单位, 错误隔离行, 依据元数据)。"""
+    value_text = canon.get("amount_value")
+    unit_text = canon.get("amount_unit")
+    amount, unit, error, meta = coerce.norm_amount_split(value_text, unit_text)
+    basis = {
+        "mode": "split",
+        "raw_amount": meta["raw_value"],
+        "raw_unit_text": meta["raw_unit"],
+        "embedded_unit": meta["embedded_unit"],
+        "factor": meta["factor"],
+        "basis": meta["basis"] or (
+            "v2 双列契约：数值/单位均未登记，按空值处理" if amount is None
+            else "v2 双列契约：仅给单位未给数值，额度按未登记"),
+    }
+    if error:
+        q = _q(error, portal=portal, source_url=source_url, row_ref=row_ref,
+               field_name="amount_unit",
+               raw_value=f"数值={value_text or ''} | 单位={unit_text or ''}",
+               detail=meta["basis"] or reasons.get(error).title)
+        return None, unit, [q], basis
+    return amount, unit, [], basis
+
+
 def parse_one(raw_fields: dict[str, str], *, portal: str = "preview",
               source_url: str = "preview://manual",
-              row_ref: str = "preview#1") -> tuple[dict | None, list[dict]]:
+              row_ref: str = "preview#1",
+              contract_version: str = contracts.CONTRACT_V1
+              ) -> tuple[dict | None, list[dict]]:
     """单条解析（M2 独立入口 /api/parse/preview 与批量共用）。"""
-    canon, unknown = fields.canonicalize(raw_fields)
+    spec = contracts.contract_for(contract_version)
+    if spec.amount_mode == "split":
+        canon, unknown = contracts.canonicalize(contract_version, raw_fields)
+    else:
+        canon, unknown = fields.canonicalize(raw_fields)
     errors: list[dict] = []
-    missing = contract.missing_required(canon)
+    missing = [name for name in spec.required_names
+               if not (canon.get(name) or "").strip()]
     if missing:
         for name in missing:
+            f = spec.field(name)
             errors.append(_q("Q_MISSING_REQUIRED", portal=portal, source_url=source_url,
                              row_ref=row_ref, field_name=name, raw_value="",
-                             detail=f"缺少必需字段 {fields.FIELD_BY_NAME[name].zh}"))
+                             detail=f"缺少必需字段 {f.zh if f else name}"))
         return None, errors
 
     doc_no, error = coerce.norm_doc_no(canon.get("doc_no"))
@@ -75,10 +127,23 @@ def parse_one(raw_fields: dict[str, str], *, portal: str = "preview",
         return None, errors
 
     title = coerce.clean(canon.get("title"))
-    amount, _unit, amount_error = coerce.norm_amount(canon.get("amount"))
-    if amount_error:
-        errors.append(_q(amount_error, portal=portal, source_url=source_url, row_ref=row_ref,
-                         field_name="amount", raw_value=canon.get("amount")))
+    amount_unit: str | None = config.MONEY_UNIT
+    amount_basis: dict
+    if spec.amount_mode == "split":
+        amount, amount_unit, amount_errors, amount_basis = _parse_amount_v2(
+            canon, portal=portal, source_url=source_url, row_ref=row_ref)
+        errors.extend(amount_errors)
+        raw_amount_text = amount_basis["raw_amount"]
+        if amount is None and not amount_unit:
+            amount_unit = None
+    else:
+        raw_amount_text = canon.get("amount")
+        amount, _u, amount_error = coerce.norm_amount(raw_amount_text)
+        if amount_error:
+            errors.append(_q(amount_error, portal=portal, source_url=source_url,
+                             row_ref=row_ref, field_name="amount",
+                             raw_value=raw_amount_text))
+        amount_basis = _amount_basis_v1(raw_amount_text, amount, _u)
     deadline_spec, deadline_error, deadline_note = coerce.norm_deadline(canon.get("deadline"))
     if deadline_error:
         errors.append(_q(deadline_error, portal=portal, source_url=source_url,
@@ -118,7 +183,7 @@ def parse_one(raw_fields: dict[str, str], *, portal: str = "preview",
         "published_at": published_at.astimezone(config.UTC).isoformat(),
         "deadline_spec": deadline_spec,
         "amount_wan": amount,
-        "amount_unit": config.MONEY_UNIT,
+        "amount_unit": amount_unit if amount_unit is not None else "",
         "target_field": target_key,
         "target_value": target_value_raw,
         "portal": portal,
@@ -128,6 +193,10 @@ def parse_one(raw_fields: dict[str, str], *, portal: str = "preview",
         "unknown_headers": unknown,
         "flags": [],
         "deadline_note": deadline_note,
+        "contract_version": contract_version,
+        "amount_mode": spec.amount_mode,
+        "amount_basis": amount_basis,
+        "raw_amount_text": amount_basis.get("raw_amount") or "",
     }
     return announcement, []
 
@@ -147,7 +216,10 @@ def resolve_target(announcement: dict) -> tuple[str, object] | None:
     return None
 
 
-def parse_records(records: list[dict]) -> ParseResult:
+def parse_records(records: list[dict], snapshots: list[dict] | None = None) -> ParseResult:
+    """批量解析。`snapshots` 给出本次采集各门户绑定的契约版本；
+    缺省时按登记表当前版本（预览/单测直连路径）。"""
+    version_by_portal = {s["portal"]: s["contract_version"] for s in (snapshots or [])}
     result = ParseResult()
     for record in records:
         result.rows_seen += 1
@@ -162,9 +234,12 @@ def parse_records(records: list[dict]) -> ParseResult:
                 raw_value=" | ".join(record.get("cells", []))[:160],
                 detail=f"表头 {header_count} 列，本行 {cell_count} 列"))
             continue
+        portal = record["portal"]
+        version = version_by_portal.get(portal) or contracts.active_version(portal)
         announcement, errors = parse_one(
-            record["fields"], portal=record["portal"],
-            source_url=record["source_url"], row_ref=record["row_ref"])
+            record["fields"], portal=portal,
+            source_url=record["source_url"], row_ref=record["row_ref"],
+            contract_version=version)
         if announcement is None:
             result.rejected_records += 1
             result.quarantine.extend(errors)

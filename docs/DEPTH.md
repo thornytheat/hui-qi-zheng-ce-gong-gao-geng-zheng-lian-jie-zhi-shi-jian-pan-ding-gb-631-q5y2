@@ -1,8 +1,9 @@
 # 深度登记 noticechain（惠企政策公告更正链与截止时间判定）
 
-- 规模：中型（7 个功能模块 / 7 个页面 / 96 条测试）
+- 规模：中型（7 个功能模块 + 契约版本化子包 / 7 个页面 / 127 条测试）
 - 核心规则一：**公告链合并**——同一 `doc_no` 的公告按 `公告序号` 成链，更正覆盖指定字段、延期顺延截止、撤销作废；链内重复序号、时间倒挂、父公告缺失一律整链隔离，给出稳定原因码与证据行，不猜哪条为准。
 - 核心规则二：**工作日截止推算**——`自发布之日起 N 个工作日` 按「周一至周五 − 法定节假日 + 调休上班日」逐日推进，发布日不计入，计数区间左闭右开 `[发布日次日, 截止日次日)`。
+- 核心规则三：**门户契约版本化**——额度列改版（带单位文本 → 数值/单位双列）按门户管理契约版本，采集时冻结快照绑定批次；v2 无单位/单位冲突进隔离，旧批次按 v1 原契约恢复、不换算旧金额；切换预检失败保留旧版。
 - 使用者与工作流：园区企服组 6 人每天盯 3 个门户，原先手工抄截止日期到表格，更正公告常被漏看；现在一次采集即可得到「当前有效截止 + 可申报清单 + 冲突隔离」，并逐条可复核。
 
 ## 功能模块
@@ -37,6 +38,11 @@
 | TRAP-23 | `自发布之日起 30 个工作日` 的截止端点在不在区间内 | 两端都算，相邻区间重复计入一天 | 声明左闭右开 `[发布日次日, 截止日次日)`，扣除节假日、计入调休 | `app/modules/m4_chain/workdays.py` | `tests/test_chain.py::test_workday_interval_is_half_open` |
 | TRAP-27 | 冲突链人工裁定与自动判定不同（自动整链隔离，人工选 800 万那版） | 只改状态或只留最终值，事后看不出原自动判定是什么 | 以人工结论重算并记 `M_MANUAL_OVERRIDE`，快照同时留 `auto_status`/`auto_amount`/`auto_deadline` 与逐字段差异 | `app/modules/m7_review/service.py`、`app/modules/m7_review/review.py` | `tests/test_m7_review.py::test_manual_ruling_overrides_conflict_and_keeps_both_values` |
 | TRAP-28 | 撤销（序号 2）之后又出现更正（序号 3） | 后到版本照常覆盖，已作废的链被复活成可申报 | 迁移表把撤销后的 发布/更正/延期 判为非法迁移，该版不能被选为有效版（`M_ILLEGAL_TRANSITION`，409）；M4 侧只登记 `C_AFTER_CANCEL`，链仍为已撤销 | `app/modules/m7_review/review.py`、`app/modules/m4_chain/chain.py` | `tests/test_m7_review.py::test_correction_after_cancel_is_illegal_transition` |
+| TRAP-29 | 门户改版把额度拆成「数值/单位」两列，新记录单位列空缺 | 沿用 v1 把两列拼回文本或默认按「万元」入账，清单金额虚高且无法追溯 | 按门户契约 v2（`contract/2.0`）双列校验：单位缺失/哨兵给 `Q_AMOUNT_UNIT_MISSING` 整行隔离，不用默认单位顶替 | `app/contracts/registry.py`、`app/modules/m2_parse/coerce.py::norm_amount_split` | `tests/test_contracts.py::test_v2_missing_unit_is_quarantined_not_defaulted` |
+| TRAP-30 | 数值列残留内嵌单位且与单位列冲突（`120万元` + 单位列 `元`） | 二选一猜一个单位，金额差 10000 倍 | 两列单位都解析，不一致给 `Q_AMOUNT_UNIT_CONFLICT` 整行隔离，依据里保留两个原值 | `app/modules/m2_parse/coerce.py::norm_amount_split` | `tests/test_contracts.py::test_v2_embedded_unit_conflict_is_quarantined` |
+| TRAP-31 | 门户切到新契约后，重跑历史失败批次把旧额度按新金额重算 | 历史清单金额被悄悄改写，导出不可复现 | 批次绑定采集时的契约快照，批次键含快照摘要；旧批次永远走 v1 文本路径，原文与采用依据落库，导出逐字节复现 | `app/contracts/snapshot.py`、`app/modules/m5_batches/state.py` | `tests/test_contract_pipeline.py::test_historical_v1_batch_reproduces_original_amount_after_registry_changes` |
+| TRAP-32 | 新契约表头与门户实际页面对不上（缺额度单位列）仍强行切换 | 切换后整门户记录全部解析失败，采集中断 | 切换前表头预检，缺必需列/额度列给 `Q_CONTRACT_PREFLIGHT_FAILED` 并保留旧版契约 | `app/contracts/registry.py::switch_with_preflight` | `tests/test_contracts.py::test_switch_preflight_failure_keeps_old_contract` |
+| TRAP-33 | 解析阶段中断后重跑，重新抓取整个门户 | 重复采集、重复公告，且源页面可能已变化导致不可复现 | 采信即落 `raw_rows` 断点表；解析/质量失败续跑直接重放已存原始行，ingest 标 `reused` 不重抓，重试不新增公告 | `app/store.py`、`app/modules/m5_batches/resume.py`、`app/modules/m5_batches/service.py` | `tests/test_contract_pipeline.py::test_parse_interruption_resumes_from_saved_raw_rows` |
 
 ## 对账规则
 
@@ -50,7 +56,7 @@
 ## 反例与不变量
 
 - 反例（朴素实现会挂）：`tests/test_chain.py::test_naive_weekday_count_differs`（只数周一至周五得到 2026-11-09，正确是 2026-11-13）、`tests/test_ingest.py::test_naive_splitlines_breaks_records`、`tests/test_parse.py::test_naive_float_parse_would_raise`、`tests/test_chain.py::test_naive_last_write_wins_would_revive_cancelled_chain`（撤销后的更正仍不能复活链）、`tests/test_m7_review.py::test_long_chain_compresses_without_changing_conclusion`（逐版覆盖会把作废链算成最后一版金额）。
-- 不变量：`tests/test_batches.py::test_idempotent_rerun_adds_no_rows`（幂等）、`tests/test_quality.py::test_reconcile_amounts_invariant_holds`（守恒）、`tests/test_ingest.py::test_page_account_identity`（页账守恒）、`tests/test_m7_review.py::test_replay_state_matches_chain_for_every_chain`（回放与链判定一致）、`tests/test_m7_review.py::test_ruling_rerun_keeps_single_trail`（裁定留痕幂等）。
+- 不变量：`tests/test_batches.py::test_idempotent_rerun_adds_no_rows`（幂等）、`tests/test_quality.py::test_reconcile_amounts_invariant_holds`（守恒）、`tests/test_ingest.py::test_page_account_identity`（页账守恒）、`tests/test_m7_review.py::test_replay_state_matches_chain_for_every_chain`（回放与链判定一致）、`tests/test_m7_review.py::test_ruling_rerun_keeps_single_trail`（裁定留痕幂等）、`tests/test_contract_pipeline.py::test_resume_does_not_duplicate_announcements`（续跑不新增公告）、`tests/test_contract_pipeline.py::test_batch_key_changes_when_contract_snapshot_changes`（契约快照入批次键）。
 - 端到端：`tests/test_e2e.py::test_full_pipeline_end_to_end`。
 
 ## 已知不覆盖

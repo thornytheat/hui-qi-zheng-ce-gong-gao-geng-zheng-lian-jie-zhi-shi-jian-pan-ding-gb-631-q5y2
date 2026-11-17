@@ -62,6 +62,11 @@ def _version_row(version: dict, note: str = "") -> dict:
         "target_value": version.get("target_value"),
         "portal": version.get("portal"), "row_ref": version.get("row_ref"),
         "source_url": version.get("source_url"), "note": note,
+        "contract_version": version.get("contract_version", "contract/1.4"),
+        "amount_mode": version.get("amount_mode", "text"),
+        "raw_amount_text": version.get("raw_amount_text", ""),
+        "amount_unit": version.get("amount_unit", config.MONEY_UNIT),
+        "amount_basis": version.get("amount_basis", {}),
     }
 
 

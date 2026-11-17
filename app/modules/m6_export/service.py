@@ -34,12 +34,41 @@ def _filename(kind: str, batch_id: str) -> str:
     return f"noticechain-{kind}-{batch_id}.{_kind(kind)['suffix'].split('.')[-1]}"
 
 
+def _amount_provenance(version_rows: list[dict]) -> dict:
+    """取链上最后一个带额度依据的版本，作为清单金额的采用依据（可逐行复现）。"""
+    fallback = {"contract_version": "contract/1.4", "amount_mode": "text",
+                "raw_amount_text": "", "amount_unit": "万元", "basis": ""}
+    if not version_rows:
+        return fallback
+    for version in reversed(version_rows):
+        basis = version.get("amount_basis") or {}
+        if version.get("amount_wan") is not None or basis.get("raw_amount") or \
+                version.get("raw_amount_text"):
+            return {
+                "contract_version": version.get("contract_version", "contract/1.4"),
+                "amount_mode": version.get("amount_mode", "text"),
+                "raw_amount_text": version.get("raw_amount_text")
+                    or basis.get("raw_amount", ""),
+                "amount_unit": version.get("amount_unit", "万元"),
+                "basis": basis.get("basis", ""),
+            }
+    last = version_rows[-1]
+    return {
+        "contract_version": last.get("contract_version", "contract/1.4"),
+        "amount_mode": last.get("amount_mode", "text"),
+        "raw_amount_text": last.get("raw_amount_text", ""),
+        "amount_unit": last.get("amount_unit", "万元"),
+        "basis": (last.get("amount_basis") or {}).get("basis", ""),
+    }
+
+
 def policies_csv(store, batch_id: str, settings) -> bytes:
     data = m4_service.list_chains(store, batch_id, settings)
     rows = []
     for chain in sorted(data["listed"], key=lambda c: (c["final_deadline"] or "9999", c["doc_no"])):
         detail = store.load_chain(batch_id, chain["doc_no"])
         trace = m4_service.deadline_trace(detail) if detail else {"spec": None}
+        provenance = _amount_provenance(detail["version_rows"]) if detail else _amount_provenance([])
         rows.append([
             chain["doc_no"], chain["title"], chain["status_label"],
             chain["final_deadline"] or "待确认",
@@ -48,6 +77,9 @@ def policies_csv(store, batch_id: str, settings) -> bytes:
             chain["versions"],
             store.load_chain(batch_id, chain["doc_no"])["version_rows"][0]["portal"],
             chain["note"],
+            provenance["contract_version"],
+            provenance["raw_amount_text"],
+            provenance["basis"],
         ])
     return csv_out.encode_csv(csv_out.to_csv(csv_out.POLICY_HEADER, rows))
 
@@ -63,6 +95,7 @@ def chains_csv(store, batch_id: str) -> bytes:
     for chain in store.load_chains(batch_id):
         detail = store.load_chain(batch_id, chain["doc_no"])
         for version in detail["version_rows"]:
+            basis = version.get("amount_basis") or {}
             rows.append([
                 chain["doc_no"], version["seq"], version["kind"],
                 version["published_at"], coerce.spec_label(version.get("deadline_spec")),
@@ -70,6 +103,11 @@ def chains_csv(store, batch_id: str) -> bytes:
                 version.get("target_field") or "", version.get("target_value") or "",
                 version.get("portal") or "", version.get("row_ref") or "",
                 version.get("note") or "",
+                version.get("contract_version", "contract/1.4"),
+                version.get("amount_mode", "text"),
+                version.get("raw_amount_text") or basis.get("raw_amount", ""),
+                version.get("amount_unit", "万元"),
+                basis.get("basis", ""),
             ])
     return csv_out.encode_csv(csv_out.to_csv(csv_out.CHAIN_HEADER, rows))
 

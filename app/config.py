@@ -102,6 +102,13 @@ PORTALS = (
         "attachment": None,
         "note": "分页缺 rel=next + 详情页时区混写",
     },
+    {
+        "id": "portal_d",
+        "name": "澄江新区政务服务办（改版门户）",
+        "seeds": ("/d/list_p1.html",),
+        "attachment": None,
+        "note": "改版后额度拆成「额度数值/额度单位」两列，按 contract/2.0 采集",
+    },
 )
 
 MAX_PAGES_PER_PORTAL = 6

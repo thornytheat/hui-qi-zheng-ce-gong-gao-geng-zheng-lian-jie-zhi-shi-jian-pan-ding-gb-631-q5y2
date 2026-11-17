@@ -23,11 +23,14 @@ def test_idempotent_rerun_adds_no_rows(settings, store, run):
 
 
 def test_batch_key_stable_for_same_input(settings, run, store):
-    """批次键 = 规则版本 + 来源 + 页面摘要集合；同一输入必然同键。"""
+    """批次键 = 规则版本 + 来源 + 页面摘要集合 + 契约快照摘要；同一输入必然同键。"""
+    from app.contracts.snapshot import snapshots_digest
     digests = state.page_digests(run["pages"])
-    key1 = state.batch_key(rule_version=settings.rule_version, source="all", digests=digests)
-    key2 = state.batch_key(rule_version=settings.rule_version, source="all",
-                           digests=list(reversed(digests)))
+    snap_digest = snapshots_digest(run["snapshots"])
+    kwargs = dict(rule_version=settings.rule_version, source="all",
+                  snapshot_digest_value=snap_digest)
+    key1 = state.batch_key(digests=digests, **kwargs)
+    key2 = state.batch_key(digests=list(reversed(digests)), **kwargs)
     assert key1 == key2 == run["batch"]["batch_key"]
 
 
@@ -46,7 +49,7 @@ def test_ingest_failure_then_resume(settings, store, fetcher):
 
 
 def test_chain_stage_failure_reuses_pages(settings, store, run):
-    """断点续跑：链判定阶段失败后重跑，采信与解析阶段标记为 reused，页面不重抓。"""
+    """断点续跑：链判定失败后重跑，采信复用页面不重抓；解析从已保存原始行重放。"""
     def boom():
         raise RuntimeError("注入的链判定失败")
 
@@ -56,12 +59,16 @@ def test_chain_stage_failure_reuses_pages(settings, store, run):
     plan = resume_mod.plan(store, failed["batch"]["batch_id"])
     assert plan["can_resume"] is True
     assert plan["reused_pages"] == X.PAGES_OK
+    assert plan["reused_raw_rows"] == X.ROWS_SEEN
+    # 失败尝试已把原始行断点落库
+    assert len(store.load_raw_rows(failed["batch"]["batch_id"])) == X.ROWS_SEEN
     resumed = batch_service.run(settings=settings, store=store, source="all",
                                 resume_of=failed["batch"]["batch_id"])
     assert resumed["status"] == "done"
     statuses = {s["stage"]: s["status"] for s in resumed["stages"]}
-    assert statuses["ingest"] == "reused"
-    assert statuses["parse"] == "reused"
+    assert statuses["ingest"] == "reused"            # 页面不重抓
+    parse_note = next(s["note"] for s in resumed["stages"] if s["stage"] == "parse")
+    assert "未重抓" in parse_note                     # 解析只重放已存原始行
     assert statuses["chain"] == "ok"
     assert resumed["reconciliation"]["all_balanced"] is True
 

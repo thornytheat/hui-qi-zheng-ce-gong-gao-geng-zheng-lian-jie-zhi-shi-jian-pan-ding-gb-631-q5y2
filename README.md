@@ -8,8 +8,10 @@
 ## 能力
 
 - **采信**：三门户列表页 + 详情页 + 附件 CSV；编码回退链（声明不信任）、BOM 剥离、rel=next 分页、
-  断页/截断识别、逐页诊断。
-- **契约**：9 个规范字段 + 三门户列名别名（同名列按精度取高分）、类型/单位/精度/可空声明。
+  断页/截断识别、逐页诊断；采信即落原始行断点，解析中断从已存原始行续跑、不重抓。
+- **契约**：9 个规范字段 + 三门户列名别名（同名列按精度取高分）、类型/单位/精度/可空声明；
+  门户契约版本化（v1 带单位文本额度 / v2 数值+单位双列），按门户登记、采集快照绑定批次，
+  v2 无单位或单位冲突进隔离，切换预检失败保留旧版，历史批次按原契约复现原金额与采用依据。
 - **质量**：转载重复合并、哨兵整行隔离、额度与日期范围校验、原因码目录与隔离导出。
 - **链判定**：更正覆盖、延期顺延、撤销作废；重复序号/时间倒挂/缺父公告三类冲突整链隔离。
 - **截止推算**：工作日表（法定节假日 − / 调休上班日 +），区间左闭右开。
@@ -74,12 +76,14 @@ docker compose up -d --build
 
 ```text
 app/                 main/config/errors/reasons/manifest/store/web + modules/m1..m7
+app/contracts/       门户契约版本化：registry（v1/v2 定义、门户登记、切换预检）+ snapshot（快照绑定）
 app/templates/       base + 7 个页面（采集/清单/链详情/隔离/复核/批次/导出）
 app/static/          theme.css（令牌）layout.css（骨架）components.css（元件）+ 3 个 js
 docs/                DEPTH.md（模块表 + TRAP 表）DATA-DICTIONARY.md（字段契约）
-sample_site/         三门户 9 个文件（含 GB18030 页、截断页、附件 CSV、门户导航）
+sample_site/         三门户 9 个文件 + 改版门户 d（v2 数值/单位双列，含缺单位/单位冲突样例）
 sample_data/         announcements_dirty.csv（同样的脏数据另存一份，便于离线核对）
-tests/               conftest + 每模块 1 个（含 test_m7_review.py）+ e2e + fixtures/expected.py
+tests/               conftest + 每模块 1 个（含 test_m7_review.py）+ e2e
+                     + test_contracts.py / test_contract_pipeline.py + fixtures/expected.py
 ```
 
 ## 测试
@@ -88,4 +92,15 @@ tests/               conftest + 每模块 1 个（含 test_m7_review.py）+ e2e 
 docker compose exec -T app pytest -q
 ```
 
-96 条测试（容器内 96 passed），覆盖 7 个模块（每模块 ≥7 条）与 14 条 TRAP；含 5 条反例、5 条不变量与端到端。
+127 条测试（容器内 127 passed；`test_http_sample_site_optional` 依赖样例站 HTTP 可达），
+覆盖 7 个模块与 33 条 TRAP；含反例、不变量、端到端与门户契约版本化全链路。
+
+### 门户契约版本化要点
+
+- 改版门户（portal_d，`sample_site/d/`）额度为「额度数值 / 额度单位」两列，按 `contract/2.0` 采集：
+  `POST /api/crawl -d '{"source":"portal_d"}'`；缺单位记 `Q_AMOUNT_UNIT_MISSING`、
+  单位冲突记 `Q_AMOUNT_UNIT_CONFLICT`，整行进隔离。
+- 契约切换：`POST /api/contract/switch`（带 `headers` 预检，失败保留旧版）；
+  目录：`GET /api/contract/portals`。
+- 批次绑定采集时的契约快照（manifest 的 `contract_snapshots`），旧批次导出仍复现 v1 原金额，
+  清单/链版本 CSV 含「契约版本、额度模式、额度原文、额度单位、采用依据」列。

@@ -42,6 +42,9 @@
         <div><dt>截止说明</dt><dd>{{ v.deadline_spec | spec }}</dd></div>
         <div><dt>额度</dt><dd class="num">{% if v.amount_wan is not none %}{{ v.amount_wan | wan }} 万元{% else %}哨兵/未登记{% endif %}</dd></div>
         {% if v.target_field %}<div><dt>更正</dt><dd>{{ target_labels.get(v.target_field, v.target_field) }} → {{ v.target_value }}</dd></div>{% endif %}
+        <div><dt>契约版本</dt><dd class="mono">{{ v.contract_version | default('contract/1.4') }}（{{ '数值+单位双列' if v.amount_mode == 'split' else '带单位文本' }}）</dd></div>
+        {% if v.raw_amount_text %}<div><dt>额度原文</dt><dd class="mono">{{ v.raw_amount_text }}{% if v.amount_unit %} {{ v.amount_unit }}{% endif %}</dd></div>{% endif %}
+        {% if v.amount_basis and v.amount_basis.basis %}<div><dt>采用依据</dt><dd class="small">{{ v.amount_basis.basis }}</dd></div>{% endif %}
       </dl>
       <a class="small" href="{{ v.source_url }}" target="_blank" rel="noopener">原始页面</a>
     </li>

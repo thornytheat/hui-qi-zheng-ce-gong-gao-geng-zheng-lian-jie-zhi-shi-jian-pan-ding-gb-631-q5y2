@@ -52,6 +52,11 @@ def _run_payload(result: dict) -> dict:
                    if k != "reconcile_json"},
         "all_balanced": (result.get("reconciliation") or {}).get("all_balanced"),
         "resume_hint": result.get("resume_hint"),
+        "contract_snapshots": [
+            {"portal": s["portal"], "contract_version": s["contract_version"],
+             "amount_mode": s["amount_mode"], "digest": s["digest"][:16]}
+            for s in result.get("snapshots", [])
+        ],
     }
 
 

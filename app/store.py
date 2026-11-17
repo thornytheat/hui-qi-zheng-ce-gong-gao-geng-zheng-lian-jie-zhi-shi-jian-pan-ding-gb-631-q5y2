@@ -24,7 +24,8 @@ CREATE TABLE IF NOT EXISTS batches (
     input_digest TEXT NOT NULL,
     resume_of TEXT,
     params_json TEXT NOT NULL DEFAULT '{}',
-    note TEXT NOT NULL DEFAULT ''
+    note TEXT NOT NULL DEFAULT '',
+    snapshot_digest TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_batches_key ON batches(batch_key, status);
 CREATE TABLE IF NOT EXISTS pages (
@@ -33,12 +34,28 @@ CREATE TABLE IF NOT EXISTS pages (
     encoding TEXT, declared_charset TEXT, bytes INTEGER, sha256 TEXT,
     row_count INTEGER NOT NULL DEFAULT 0, code TEXT, note TEXT
 );
+CREATE TABLE IF NOT EXISTS raw_rows (
+    batch_id TEXT NOT NULL, portal TEXT NOT NULL, source_url TEXT NOT NULL,
+    row_ref TEXT NOT NULL, header_count INTEGER NOT NULL, cell_count INTEGER NOT NULL,
+    fields_json TEXT NOT NULL, cells_json TEXT NOT NULL, page_url TEXT NOT NULL,
+    note TEXT NOT NULL DEFAULT '', processed INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (batch_id, row_ref)
+);
+CREATE TABLE IF NOT EXISTS contract_snapshots (
+    batch_id TEXT NOT NULL, portal TEXT NOT NULL, contract_version TEXT NOT NULL,
+    amount_mode TEXT NOT NULL, digest TEXT NOT NULL, contract_json TEXT NOT NULL,
+    PRIMARY KEY (batch_id, portal)
+);
 CREATE TABLE IF NOT EXISTS announcements (
     batch_id TEXT NOT NULL, doc_no TEXT NOT NULL, seq INTEGER NOT NULL, kind TEXT NOT NULL,
     title TEXT NOT NULL, published_at TEXT NOT NULL, deadline_spec_json TEXT,
     amount_wan TEXT, amount_unit TEXT, target_field TEXT, target_value TEXT,
     portal TEXT NOT NULL, source_url TEXT NOT NULL, row_ref TEXT NOT NULL,
-    raw_json TEXT NOT NULL DEFAULT '{}', flags_json TEXT NOT NULL DEFAULT '[]'
+    raw_json TEXT NOT NULL DEFAULT '{}', flags_json TEXT NOT NULL DEFAULT '[]',
+    contract_version TEXT NOT NULL DEFAULT 'contract/1.4',
+    amount_mode TEXT NOT NULL DEFAULT 'text',
+    raw_amount_text TEXT NOT NULL DEFAULT '',
+    amount_basis_json TEXT NOT NULL DEFAULT '{}'
 );
 CREATE TABLE IF NOT EXISTS quarantine (
     batch_id TEXT NOT NULL, code TEXT NOT NULL, stage TEXT NOT NULL, level TEXT NOT NULL,
@@ -54,7 +71,12 @@ CREATE TABLE IF NOT EXISTS chain_versions (
     batch_id TEXT NOT NULL, doc_no TEXT NOT NULL, seq INTEGER NOT NULL, kind TEXT NOT NULL,
     title TEXT NOT NULL, published_at TEXT NOT NULL, deadline_spec_json TEXT,
     amount_wan TEXT, target_field TEXT, target_value TEXT, portal TEXT,
-    row_ref TEXT, source_url TEXT, note TEXT NOT NULL DEFAULT ''
+    row_ref TEXT, source_url TEXT, note TEXT NOT NULL DEFAULT '',
+    contract_version TEXT NOT NULL DEFAULT 'contract/1.4',
+    amount_mode TEXT NOT NULL DEFAULT 'text',
+    raw_amount_text TEXT NOT NULL DEFAULT '',
+    amount_unit TEXT NOT NULL DEFAULT '万元',
+    amount_basis_json TEXT NOT NULL DEFAULT '{}'
 );
 CREATE TABLE IF NOT EXISTS stages (
     batch_id TEXT NOT NULL, stage TEXT NOT NULL, in_count INTEGER NOT NULL,
@@ -77,12 +99,42 @@ CREATE TABLE IF NOT EXISTS manifests (
 """
 
 
+# 旧库增量列：建表只对新库生效，已存在的库用 ALTER TABLE 补齐（IF NOT EXISTS 不支持列）。
+_MIGRATIONS = {
+    "announcements": [
+        ("contract_version", "TEXT NOT NULL DEFAULT 'contract/1.4'"),
+        ("amount_mode", "TEXT NOT NULL DEFAULT 'text'"),
+        ("raw_amount_text", "TEXT NOT NULL DEFAULT ''"),
+        ("amount_basis_json", "TEXT NOT NULL DEFAULT '{}'"),
+    ],
+    "chain_versions": [
+        ("contract_version", "TEXT NOT NULL DEFAULT 'contract/1.4'"),
+        ("amount_mode", "TEXT NOT NULL DEFAULT 'text'"),
+        ("raw_amount_text", "TEXT NOT NULL DEFAULT ''"),
+        ("amount_unit", "TEXT NOT NULL DEFAULT '万元'"),
+        ("amount_basis_json", "TEXT NOT NULL DEFAULT '{}'"),
+    ],
+    "batches": [
+        ("snapshot_digest", "TEXT NOT NULL DEFAULT ''"),
+    ],
+}
+
+
 class Store:
     def __init__(self, path: str):
         self.path = str(path)
         Path(self.path).resolve().parent.mkdir(parents=True, exist_ok=True)
         with self.connect() as conn:
             conn.executescript(SCHEMA)
+            self._migrate(conn)
+
+    def _migrate(self, conn) -> None:
+        for table, columns in _MIGRATIONS.items():
+            existing = {row["name"] for row in conn.execute(
+                f"PRAGMA table_info({table})").fetchall()}
+            for name, decl in columns:
+                if name not in existing:
+                    conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {decl}")
 
     @contextmanager
     def connect(self):
@@ -147,33 +199,35 @@ class Store:
     # ---------- 运行结果落库（单事务替换） ----------
     def save_run(self, *, batch: dict, pages: list[dict], announcements: list[dict],
                  quarantine: list[dict], chains: list[dict], versions: list[dict],
-                 stages: list[dict], totals: dict, manifest: dict) -> None:
+                 stages: list[dict], totals: dict, manifest: dict,
+                 raw_rows: list[dict] | None = None,
+                 snapshots: list[dict] | None = None) -> None:
         with self.connect() as conn:
             for table in ("pages", "announcements", "quarantine", "chains",
-                          "chain_versions", "stages", "totals"):
+                          "chain_versions", "stages", "totals", "raw_rows",
+                          "contract_snapshots"):
                 conn.execute(f"DELETE FROM {table} WHERE batch_id=?", (batch["batch_id"],))
-            for p in pages:
-                conn.execute(
-                    """INSERT INTO pages (batch_id,url,portal,kind,page_no,status,http_status,
-                        encoding,declared_charset,bytes,sha256,row_count,code,note)
-                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                    (batch["batch_id"], p["url"], p["portal"], p["kind"], p["page_no"],
-                     p["status"], p.get("http_status"), p.get("encoding"),
-                     p.get("declared_charset"), p.get("bytes"), p.get("sha256"),
-                     p.get("row_count", 0), p.get("code"), p.get("note", "")))
+            self._insert_pages(conn, batch["batch_id"], pages)
+            self._insert_raw_rows(conn, batch["batch_id"], raw_rows or [])
+            self._insert_snapshots(conn, batch["batch_id"], snapshots or [])
             for a in announcements:
                 conn.execute(
                     """INSERT INTO announcements (batch_id,doc_no,seq,kind,title,published_at,
                         deadline_spec_json,amount_wan,amount_unit,target_field,target_value,
-                        portal,source_url,row_ref,raw_json,flags_json)
-                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                        portal,source_url,row_ref,raw_json,flags_json,contract_version,
+                        amount_mode,raw_amount_text,amount_basis_json)
+                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                     (batch["batch_id"], a["doc_no"], a["seq"], a["kind"], a["title"],
                      a["published_at"], json.dumps(a.get("deadline_spec"), ensure_ascii=False),
                      None if a.get("amount_wan") is None else str(a["amount_wan"]),
                      a.get("amount_unit"), a.get("target_field"), a.get("target_value"),
                      a["portal"], a["source_url"], a["row_ref"],
                      json.dumps(a.get("raw", {}), ensure_ascii=False),
-                     json.dumps(a.get("flags", []), ensure_ascii=False)))
+                     json.dumps(a.get("flags", []), ensure_ascii=False),
+                     a.get("contract_version", "contract/1.4"),
+                     a.get("amount_mode", "text"),
+                     a.get("raw_amount_text", ""),
+                     json.dumps(a.get("amount_basis", {}), ensure_ascii=False)))
             for q in quarantine:
                 conn.execute(
                     """INSERT INTO quarantine (batch_id,code,stage,level,portal,source_url,
@@ -195,12 +249,19 @@ class Store:
                 conn.execute(
                     """INSERT INTO chain_versions (batch_id,doc_no,seq,kind,title,published_at,
                         deadline_spec_json,amount_wan,target_field,target_value,portal,row_ref,
-                        source_url,note) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                        source_url,note,contract_version,amount_mode,raw_amount_text,
+                        amount_unit,amount_basis_json)
+                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                     (batch["batch_id"], v["doc_no"], v["seq"], v["kind"], v["title"],
                      v["published_at"], json.dumps(v.get("deadline_spec"), ensure_ascii=False),
                      None if v.get("amount_wan") is None else str(v["amount_wan"]),
                      v.get("target_field"), v.get("target_value"), v.get("portal"),
-                     v.get("row_ref"), v.get("source_url"), v.get("note", "")))
+                     v.get("row_ref"), v.get("source_url"), v.get("note", ""),
+                     v.get("contract_version", "contract/1.4"),
+                     v.get("amount_mode", "text"),
+                     v.get("raw_amount_text", ""),
+                     v.get("amount_unit", "万元"),
+                     json.dumps(v.get("amount_basis", {}), ensure_ascii=False)))
             for s in stages:
                 conn.execute(
                     """INSERT INTO stages (batch_id,stage,in_count,out_count,quarantine_count,
@@ -216,50 +277,120 @@ class Store:
                 (batch["batch_id"], json.dumps(manifest, ensure_ascii=False)))
             conn.execute(
                 """INSERT INTO batches (batch_id,batch_key,run_id,source,status,created_at,
-                        finished_at,input_digest,resume_of,params_json,note)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?)
+                        finished_at,input_digest,resume_of,params_json,note,snapshot_digest)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
                    ON CONFLICT(batch_id) DO UPDATE SET
                      status=excluded.status, finished_at=excluded.finished_at,
-                     note=excluded.note, input_digest=excluded.input_digest""",
+                     note=excluded.note, input_digest=excluded.input_digest,
+                     snapshot_digest=excluded.snapshot_digest""",
                 (batch["batch_id"], batch["batch_key"], batch["run_id"], batch["source"],
                  batch["status"], batch["created_at"], batch.get("finished_at"),
                  batch["input_digest"], batch.get("resume_of"),
                  json.dumps(batch.get("params", {}), ensure_ascii=False),
-                 batch.get("note", "")))
+                 batch.get("note", ""), batch.get("snapshot_digest", "")))
 
     def save_attempt(self, *, batch: dict, pages: list[dict], stages: list[dict],
-                     note: str = "") -> None:
-        """失败尝试：只写批次、页面与阶段，不清空任何已有批次的数据。"""
+                     note: str = "", raw_rows: list[dict] | None = None,
+                     snapshots: list[dict] | None = None) -> None:
+        """失败尝试：写批次、页面、阶段与已采集的原始行断点，不清空任何已有批次的数据。
+
+        原始行在采信阶段就落库：解析中断后续跑直接从这些行继续，不重抓页面。
+        """
         with self.connect() as conn:
             conn.execute(
                 """INSERT INTO batches (batch_id,batch_key,run_id,source,status,created_at,
-                        finished_at,input_digest,resume_of,params_json,note)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?)
+                        finished_at,input_digest,resume_of,params_json,note,snapshot_digest)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
                    ON CONFLICT(batch_id) DO UPDATE SET
                      status=excluded.status, finished_at=excluded.finished_at,
-                     note=excluded.note""",
+                     note=excluded.note, snapshot_digest=excluded.snapshot_digest""",
                 (batch["batch_id"], batch["batch_key"], batch["run_id"], batch["source"],
                  batch["status"], batch["created_at"], batch.get("finished_at"),
                  batch["input_digest"], batch.get("resume_of"),
                  json.dumps(batch.get("params", {}), ensure_ascii=False),
-                 note or batch.get("note", "")))
+                 note or batch.get("note", ""), batch.get("snapshot_digest", "")))
             conn.execute("DELETE FROM pages WHERE batch_id=?", (batch["batch_id"],))
             conn.execute("DELETE FROM stages WHERE batch_id=?", (batch["batch_id"],))
-            for p in pages:
-                conn.execute(
-                    """INSERT INTO pages (batch_id,url,portal,kind,page_no,status,http_status,
-                        encoding,declared_charset,bytes,sha256,row_count,code,note)
-                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                    (batch["batch_id"], p["url"], p["portal"], p["kind"], p["page_no"],
-                     p["status"], p.get("http_status"), p.get("encoding"),
-                     p.get("declared_charset"), p.get("bytes"), p.get("sha256"),
-                     p.get("row_count", 0), p.get("code"), p.get("note", "")))
+            self._insert_pages(conn, batch["batch_id"], pages)
+            if raw_rows is not None:
+                conn.execute("DELETE FROM raw_rows WHERE batch_id=?", (batch["batch_id"],))
+                self._insert_raw_rows(conn, batch["batch_id"], raw_rows)
+            if snapshots is not None:
+                conn.execute("DELETE FROM contract_snapshots WHERE batch_id=?",
+                             (batch["batch_id"],))
+                self._insert_snapshots(conn, batch["batch_id"], snapshots)
             for s in stages:
                 conn.execute(
                     """INSERT INTO stages (batch_id,stage,in_count,out_count,quarantine_count,
                         status,elapsed_ms,note) VALUES (?,?,?,?,?,?,?,?)""",
                     (batch["batch_id"], s["stage"], s["in_count"], s["out_count"],
                      s["quarantine_count"], s["status"], s["elapsed_ms"], s.get("note", "")))
+
+    def _insert_pages(self, conn, batch_id: str, pages: list[dict]) -> None:
+        for p in pages:
+            conn.execute(
+                """INSERT INTO pages (batch_id,url,portal,kind,page_no,status,http_status,
+                    encoding,declared_charset,bytes,sha256,row_count,code,note)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (batch_id, p["url"], p["portal"], p["kind"], p["page_no"],
+                 p["status"], p.get("http_status"), p.get("encoding"),
+                 p.get("declared_charset"), p.get("bytes"), p.get("sha256"),
+                 p.get("row_count", 0), p.get("code"), p.get("note", "")))
+
+    def _insert_raw_rows(self, conn, batch_id: str, raw_rows: list[dict]) -> None:
+        for r in raw_rows:
+            conn.execute(
+                """INSERT INTO raw_rows (batch_id,portal,source_url,row_ref,header_count,
+                    cell_count,fields_json,cells_json,page_url,note,processed)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?)
+                   ON CONFLICT(batch_id,row_ref) DO UPDATE SET
+                     fields_json=excluded.fields_json, cells_json=excluded.cells_json,
+                     processed=excluded.processed""",
+                (batch_id, r["portal"], r["source_url"], r["row_ref"],
+                 r.get("header_count", 0), r.get("cell_count", 0),
+                 json.dumps(r.get("fields", {}), ensure_ascii=False),
+                 json.dumps(r.get("cells", []), ensure_ascii=False),
+                 r.get("page_url", r["source_url"]), r.get("note", ""),
+                 1 if r.get("processed") else 0))
+
+    def _insert_snapshots(self, conn, batch_id: str, snapshots: list[dict]) -> None:
+        for snap in snapshots:
+            conn.execute(
+                """INSERT INTO contract_snapshots (batch_id,portal,contract_version,
+                    amount_mode,digest,contract_json) VALUES (?,?,?,?,?,?)
+                   ON CONFLICT(batch_id,portal) DO UPDATE SET
+                     contract_version=excluded.contract_version,
+                     amount_mode=excluded.amount_mode, digest=excluded.digest,
+                     contract_json=excluded.contract_json""",
+                (batch_id, snap["portal"], snap["contract_version"],
+                 snap["amount_mode"], snap["digest"],
+                 json.dumps(snap.get("contract", {}), ensure_ascii=False)))
+
+    def save_raw_rows(self, batch_id: str, raw_rows: list[dict]) -> None:
+        """采信阶段单独落原始行断点（失败尝试路径也可调用）。"""
+        with self.connect() as conn:
+            self._insert_raw_rows(conn, batch_id, raw_rows)
+
+    def save_contract_snapshots(self, batch_id: str, snapshots: list[dict]) -> None:
+        with self.connect() as conn:
+            self._insert_snapshots(conn, batch_id, snapshots)
+
+    def load_raw_rows(self, batch_id: str) -> list[dict]:
+        rows = self._all(
+            "SELECT * FROM raw_rows WHERE batch_id=? ORDER BY portal, source_url, row_ref",
+            (batch_id,))
+        for r in rows:
+            r["fields"] = json.loads(r.pop("fields_json"))
+            r["cells"] = json.loads(r.pop("cells_json"))
+            r["processed"] = bool(r["processed"])
+        return rows
+
+    def load_contract_snapshots(self, batch_id: str) -> list[dict]:
+        rows = self._all(
+            "SELECT * FROM contract_snapshots WHERE batch_id=? ORDER BY portal", (batch_id,))
+        for r in rows:
+            r["contract"] = json.loads(r.pop("contract_json"))
+        return rows
 
     # ---------- 人工裁定（M7，按链唯一，重裁定覆盖并把旧值从留痕里挤掉） ----------
     def save_ruling(self, ruling: dict) -> None:
@@ -298,6 +429,7 @@ class Store:
             r["raw"] = json.loads(r.pop("raw_json") or "{}")
             r["flags"] = json.loads(r.pop("flags_json") or "[]")
             r["amount_wan"] = None if r["amount_wan"] is None else _dec(r["amount_wan"])
+            r["amount_basis"] = json.loads(r.pop("amount_basis_json") or "{}")
         return rows
 
     def load_quarantine(self, batch_id: str) -> list[dict]:
@@ -330,6 +462,7 @@ class Store:
         for v in versions:
             v["deadline_spec"] = json.loads(v.pop("deadline_spec_json") or "null")
             v["amount_wan"] = None if v["amount_wan"] is None else _dec(v["amount_wan"])
+            v["amount_basis"] = json.loads(v.pop("amount_basis_json") or "{}")
         chain["version_rows"] = versions
         return chain
 
@@ -352,7 +485,8 @@ class Store:
     def count_rows(self, batch_id: str) -> dict:
         with self.connect() as conn:
             out = {}
-            for table in ("pages", "announcements", "quarantine", "chains", "chain_versions"):
+            for table in ("pages", "raw_rows", "announcements", "quarantine",
+                          "chains", "chain_versions"):
                 out[table] = conn.execute(
                     f"SELECT COUNT(*) AS n FROM {table} WHERE batch_id=?", (batch_id,)
                 ).fetchone()["n"]

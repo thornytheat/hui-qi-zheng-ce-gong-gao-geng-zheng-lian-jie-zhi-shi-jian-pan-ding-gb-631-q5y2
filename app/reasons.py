@@ -74,6 +74,21 @@ REASONS = {
     "Q_BAD_AMOUNT": _r(
         "Q_BAD_AMOUNT", ERROR, "parse",
         "资助额度无法归一为万元", "检查是否缺单位或混入说明文字"),
+    "Q_AMOUNT_UNIT_MISSING": _r(
+        "Q_AMOUNT_UNIT_MISSING", ERROR, "parse",
+        "v2 契约记录缺少额度单位列（或单位列为空/哨兵）",
+        "改版后单位是独立必填列，禁止用默认单位顶替，回源补齐后再采"),
+    "Q_AMOUNT_UNIT_CONFLICT": _r(
+        "Q_AMOUNT_UNIT_CONFLICT", ERROR, "parse",
+        "v2 契约记录的额度单位列与数值列内嵌单位冲突，或单位取值未登记",
+        "两列单位必须一致；不猜以哪个为准，整行隔离待人工确认"),
+    "Q_CONTRACT_PREFLIGHT_FAILED": _r(
+        "Q_CONTRACT_PREFLIGHT_FAILED", WARN, "parse",
+        "契约切换预检未通过：表头缺必需列或额度列，已保留旧版契约",
+        "对照新契约列名补表头后再切换，门户不会被切到无法解析的契约上"),
+    "Q_CONTRACT_UNKNOWN_VERSION": _r(
+        "Q_CONTRACT_UNKNOWN_VERSION", ERROR, "parse",
+        "请求切换到未登记的契约版本", "只用系统登记过的 contract/1.4 与 contract/2.0"),
     "Q_BAD_DEADLINE_RULE": _r(
         "Q_BAD_DEADLINE_RULE", WARN, "parse",
         "截止说明无法识别为工作日/自然日/绝对日期", "补规则或人工登记绝对日期"),

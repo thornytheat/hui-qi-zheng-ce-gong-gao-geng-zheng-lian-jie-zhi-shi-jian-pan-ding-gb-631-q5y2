@@ -130,6 +130,77 @@ def norm_amount(text: str | None) -> tuple[Decimal | None, str | None, str | Non
     return (number * factor).quantize(config.DECIMAL_QUANT), config.MONEY_UNIT, None
 
 
+def _split_embedded_unit(text: str) -> tuple[str, str | None]:
+    """拆出数值串末尾内嵌的单位（v2 数值列若仍带单位时用于冲突检测）。"""
+    for candidate in _UNIT_PATTERNS:
+        if text.endswith(candidate):
+            return text[: -len(candidate)], candidate
+    return text, None
+
+
+def norm_amount_split(value_text: str | None, unit_text: str | None,
+                      unit_choices: tuple[str, ...] = ("万元", "元", "亿元"),
+                      unit_aliases: dict | None = None
+                      ) -> tuple[Decimal | None, str | None, str | None, dict]:
+    """v2 契约：额度数值列 + 额度单位列 分开归一。
+
+    → (万元 Decimal | None, 归一后的单位 | None, 错误码, 依据元数据)。
+    规则：
+    - 两列都是哨兵/空 → 未登记（None, None, None），三态语义与 v1 对齐；
+    - 单位列缺失/哨兵而数值列有值 → Q_AMOUNT_UNIT_MISSING，不用默认单位顶替；
+    - 单位取值未登记 → Q_AMOUNT_UNIT_CONFLICT；
+    - 数值列内嵌单位且与单位列不一致 → Q_AMOUNT_UNIT_CONFLICT，不猜以哪个为准；
+    - 数值无法 Decimal 化 → Q_BAD_AMOUNT；
+    - 成功时返回折算后的万元值，依据里保留原值、原单位与换算系数，导出可复现。
+    """
+    from ...contracts.registry import V2_UNIT_ALIASES
+
+    aliases = unit_aliases or V2_UNIT_ALIASES
+    raw_value = clean(value_text)
+    raw_unit = clean(unit_text)
+    meta = {"raw_value": raw_value, "raw_unit": raw_unit, "embedded_unit": None,
+            "factor": None, "basis": ""}
+    value_sentinel = is_sentinel(raw_value) or is_deferred(raw_value)
+    unit_sentinel = is_sentinel(raw_unit)
+    if value_sentinel and unit_sentinel:
+        return None, None, None, meta
+    if value_sentinel and not unit_sentinel:
+        # 有单位没数值：按未登记处理（额度本就非必填），单位留痕
+        return None, aliases.get(raw_unit, raw_unit), None, meta
+    if unit_sentinel:
+        return None, None, "Q_AMOUNT_UNIT_MISSING", meta
+    unit = aliases.get(raw_unit) or aliases.get(raw_unit.lower())
+    if unit is None or unit not in unit_choices:
+        meta["basis"] = f"单位「{raw_unit}」不在登记取值 {unit_choices} 内"
+        return None, None, "Q_AMOUNT_UNIT_CONFLICT", meta
+
+    number_text = to_halfwidth(raw_value)
+    for symbol in ("￥", "¥", "RMB", "人民币", "约"):
+        number_text = number_text.replace(symbol, "")
+    number_text = number_text.replace(",", "").replace("_", "").replace(" ", "")
+    number_text, embedded = _split_embedded_unit(number_text)
+    if embedded:
+        embedded_norm = aliases.get(embedded) or embedded
+        meta["embedded_unit"] = embedded
+        if embedded_norm != unit:
+            meta["basis"] = (f"单位列「{raw_unit}」与数值列内嵌单位「{embedded}」"
+                             f"不一致，不猜以哪个为准")
+            return None, None, "Q_AMOUNT_UNIT_CONFLICT", meta
+    if not number_text:
+        return None, unit, "Q_BAD_AMOUNT", meta
+    try:
+        number = Decimal(number_text)
+    except (InvalidOperation, ValueError):
+        return None, unit, "Q_BAD_AMOUNT", meta
+    factor = config.UNIT_TO_WAN.get(unit)
+    if factor is None:
+        return None, unit, "Q_AMOUNT_UNIT_CONFLICT", meta
+    meta["factor"] = str(factor)
+    meta["basis"] = (f"v2 双列：数值「{raw_value}」× 单位「{unit}」"
+                     f"（系数 {factor}）→ 万元，未做旧文本换算")
+    return (number * factor).quantize(config.DECIMAL_QUANT), unit, None, meta
+
+
 def norm_instant(text: str | None) -> tuple[dt.datetime | None, str | None]:
     """→ (UTC aware datetime, 错误码)。日期型按 Asia/Shanghai 当日 00:00 处理。"""
     raw = clean(text)

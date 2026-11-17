@@ -92,6 +92,32 @@
 
 <section class="panel">
   <div class="panel-head">
+    <h2>门户契约版本（按门户管理 · 采集时冻结快照绑定批次）</h2>
+    <p class="panel-sub">支持 {{ contract.supported_contract_versions | join(' / ') }}；历史批次按各自快照解释，切换不改写历史金额。</p>
+  </div>
+  <div class="table-wrap">
+    <table class="grid compact">
+      <thead><tr><th>门户</th><th>当前契约</th><th>额度模式</th><th>额度列</th></tr></thead>
+      <tbody>
+        {% for portal_id, ver in contract.active_contract_versions.items() %}
+        {% set spec = contract.contracts[ver] %}
+        <tr>
+          <td class="mono">{{ portal_id }}</td>
+          <td class="mono">{{ ver }}</td>
+          <td>{{ '数值+单位双列（v2）' if spec.amount_mode == 'split' else '带单位单列文本（v1）' }}</td>
+          <td class="small">
+            {% if spec.amount_mode == 'split' %}额度数值 + 额度单位（缺单位/单位冲突进隔离）{% else %}资助额度（文本内嵌单位，按单位表折算）{% endif %}
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  <p class="hint">契约切换先做表头预检：预检失败保留旧版（原因码 Q_CONTRACT_PREFLIGHT_FAILED），不会把门户切到无法解析的契约。</p>
+</section>
+
+<section class="panel">
+  <div class="panel-head">
     <h2>原因码目录</h2>
     <p class="panel-sub">共 {{ contract.reason_codes|length }} 个稳定原因码，跨模块唯一来源。</p>
   </div>

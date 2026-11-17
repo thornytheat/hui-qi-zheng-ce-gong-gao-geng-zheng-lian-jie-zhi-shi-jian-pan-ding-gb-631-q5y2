@@ -30,7 +30,9 @@ def digest_parts(parts: list[str]) -> str:
 
 def build(*, run_id: str, batch_id: str, batch_key: str, settings, source: str,
           input_digest: str, pages: list[dict], params: dict, started_at: str,
-          finished_at: str, elapsed_ms: int, stages: list[dict], counters: dict) -> dict:
+          finished_at: str, elapsed_ms: int, stages: list[dict], counters: dict,
+          snapshots: list[dict] | None = None) -> dict:
+    snapshots = snapshots or []
     return {
         "run_id": run_id,
         "batch_id": batch_id,
@@ -42,6 +44,13 @@ def build(*, run_id: str, batch_id: str, batch_key: str, settings, source: str,
         "decimals": "金额 Decimal，单位万元，最小刻度 0.01",
         "timezone": "入库 UTC，展示 Asia/Shanghai(+08:00)",
         "input_digest": input_digest,
+        "contract_snapshot_digest": _snapshots_digest(snapshots),
+        "contract_snapshots": [
+            {"portal": s["portal"], "contract_version": s["contract_version"],
+             "amount_mode": s["amount_mode"], "digest": s["digest"]}
+            for s in snapshots
+        ],
+        "contract_binding": "批次按采集时的门户契约快照解析与导出；旧批次不被后续契约切换改写",
         "inputs": [
             {"url": p["url"], "status": p["status"], "bytes": p["bytes"],
              "sha256": p["sha256"], "encoding": p["encoding"]}
@@ -53,5 +62,10 @@ def build(*, run_id: str, batch_id: str, batch_key: str, settings, source: str,
         "elapsed_ms": elapsed_ms,
         "stages": stages,
         "counters": counters,
-        "replayable": "同 batch_key 重跑返回同一批次，不新增行",
+        "replayable": "同 batch_key（含契约快照摘要）重跑返回同一批次，不新增行",
     }
+
+
+def _snapshots_digest(snapshots: list[dict]) -> str:
+    from .contracts.snapshot import snapshots_digest
+    return snapshots_digest(snapshots)

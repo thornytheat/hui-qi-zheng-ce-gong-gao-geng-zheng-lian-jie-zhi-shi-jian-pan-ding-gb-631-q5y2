@@ -18,9 +18,17 @@ def new_batch_id(prefix: str = "b") -> str:
     return f"{prefix}{stamp}{uuid.uuid4().hex[:4]}"
 
 
-def batch_key(*, rule_version: str, source: str, digests: list[str]) -> str:
+def batch_key(*, rule_version: str, source: str, digests: list[str],
+              snapshot_digest_value: str = "") -> str:
+    """批次键 = sha256(规则版本 + 来源 + 页面摘要集合 + 门户契约快照摘要)。
+
+    同输入且同契约快照的重跑得到同一个键（幂等）；门户契约切换后，
+    即便页面字节相同，快照摘要不同也会产生新批次，历史批次不被新契约改写。
+    """
     payload = json.dumps({"rule": rule_version, "source": source,
-                          "pages": sorted(digests)}, ensure_ascii=False)
+                          "pages": sorted(digests),
+                          "contract_snapshot": snapshot_digest_value},
+                         ensure_ascii=False)
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
@@ -62,9 +70,9 @@ def page_digests(pages: list[dict]) -> list[str]:
 
 def new_run_manifest(*, run_id, batch_id, batch_key_value, settings, source, input_digest,
                      pages, params, started_at, finished_at, elapsed_ms, stages,
-                     counters) -> dict:
+                     counters, snapshots=None) -> dict:
     return manifest.build(
         run_id=run_id, batch_id=batch_id, batch_key=batch_key_value, settings=settings,
         source=source, input_digest=input_digest, pages=pages, params=params,
         started_at=started_at, finished_at=finished_at, elapsed_ms=elapsed_ms,
-        stages=stages, counters=counters)
+        stages=stages, counters=counters, snapshots=snapshots)

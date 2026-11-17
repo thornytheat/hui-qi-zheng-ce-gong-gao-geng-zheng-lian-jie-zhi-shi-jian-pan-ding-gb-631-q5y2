@@ -25,10 +25,18 @@
     <div><dt>运行号</dt><dd class="mono ellipsis" title="{{ row.run_id }}">{{ row.run_id }}</dd></div>
     <div><dt>批次键</dt><dd class="mono ellipsis" title="{{ row.batch_key }}">{{ row.batch_key[:24] }}…</dd></div>
     <div><dt>页面</dt><dd class="num">{{ row.rows.get('pages', 0) }}</dd></div>
+    <div><dt>原始行</dt><dd class="num">{{ row.rows.get('raw_rows', 0) }}</dd></div>
     <div><dt>公告</dt><dd class="num">{{ row.rows.get('announcements', 0) }}</dd></div>
     <div><dt>隔离</dt><dd class="num">{{ row.rows.get('quarantine', 0) }}</dd></div>
     <div><dt>链</dt><dd class="num">{{ row.rows.get('chains', 0) }}</dd></div>
   </dl>
+  {% if row.contract_snapshots %}
+  <p class="hint">绑定契约快照：
+    {% for s in row.contract_snapshots %}
+    <span class="badge badge-ok mono">{{ s.portal }}@{{ s.contract_version }}（{{ '数值+单位双列' if s.amount_mode == 'split' else '带单位文本' }}）</span>
+    {% endfor %}
+  </p>
+  {% endif %}
   <ol class="mini-rail">
     {% for s in row.stages %}
     <li class="is-{{ s.status }}"><span class="mini-label">{{ s.label }}</span><span class="mini-note">{{ s.in_count }}→{{ s.out_count }}</span></li>
@@ -45,7 +53,7 @@
   </div>
   {% if plans.get(row.batch_id) %}
   <p class="hint">续跑计划：{{ plans[row.batch_id].note }}
-    {% if plans[row.batch_id].from_stage %}（失败阶段 {{ stage_labels[plans[row.batch_id].from_stage] }}，复用页面 {{ plans[row.batch_id].reused_pages }} 个）{% endif %}
+    {% if plans[row.batch_id].from_stage %}（失败阶段 {{ stage_labels[plans[row.batch_id].from_stage] }}，复用页面 {{ plans[row.batch_id].reused_pages }} 个、原始行 {{ plans[row.batch_id].reused_raw_rows }} 条，不重抓）{% endif %}
   </p>
   {% endif %}
 </section>
